@@ -25,7 +25,8 @@ struct scheduledEvent {
 #define STATE_IN_USE_PEEING_SITTING 5
 #define STATE_IN_USE_CLEANING 6
 #define STATE_TRIGGERED 7
-#define STATE_OPERATOR_MENU 8
+#define STATE_TRIGGERED_DOUBLE 8
+#define STATE_OPERATOR_MENU 9
 
 OneWire oneWire(ONE_WIRE_BUS);
 DallasTemperature sensors(&oneWire);
@@ -87,7 +88,7 @@ scheduledEvent eventArray[numEvents] = { // stores all scheduled events
       }
     } else if (lightLevel - newLightLevel > 150) {
       if (currentState == STATE_IN_USE_POOPING) {
-        currentState = STATE_TRIGGERED; // user is done pooping
+        currentState = STATE_TRIGGERED_DOUBLE; // user is done pooping
       } else if (currentState == STATE_IN_USE_CLEANING) {
         currentState = STATE_NOT_IN_USE; // user is done cleaning
       } else if (currentState == STATE_IN_USE_PEEING_SITTING) {
@@ -119,6 +120,7 @@ unsigned long currentMillis = 0;
 byte ledState = 0;
 
 void setup() {
+  pinMode(12, OUTPUT);
   pinMode(trigPin, OUTPUT);
   pinMode(echoPin, INPUT);
   
@@ -138,6 +140,7 @@ void setup() {
   lcd.setCursor(10, 1);
   lcd.print(remainingSprays);
 
+  attachInterrupt(digitalPinToInterrupt(2), sprayInterrupt, FALLING);
 }
 
 void loop() {
@@ -147,10 +150,6 @@ void loop() {
   buttonsState += 1 - digitalRead(2);
     
   eventLoop();
-  Serial.print("Distance: ");
-  Serial.print(distance);
-  Serial.print(", seatDist: ");
-  Serial.println(seatDistance());
 
   switch (currentState) {
     case STATE_IN_USE_SEAT_UP:
@@ -162,6 +161,18 @@ void loop() {
       if (millis() - stateEntered >= 120000) {
         currentState = STATE_IN_USE_PEEING_SITTING;
       }
+      break;
+    case STATE_IN_USE_PEEING_STANDING:
+      currentState = STATE_TRIGGERED;
+      break;
+    case STATE_TRIGGERED_DOUBLE:
+      spray();
+      currentState = STATE_TRIGGERED;
+      break;
+    case STATE_TRIGGERED:
+      spray();
+      currentState = STATE_NOT_IN_USE;
+      break;
     default:
       break;
   }
@@ -175,4 +186,22 @@ void eventLoop() { // handles running of all scheduled events
       eventArray[i].func();
     }
   }
+}
+
+void spray() {
+  Serial.println("Spraying"); // might want to disable operator menu while pin 12 is HIGH
+  digitalWrite(12, HIGH);
+  delay(700);
+  digitalWrite(12, LOW);
+  Serial.println("Done spraying");
+}
+
+int lastSprayInterrupt = 0;
+
+void sprayInterrupt() {
+  int currTime = millis();
+  if (currTime - lastSprayInterrupt > 100) {
+      currentState = STATE_TRIGGERED;
+  }
+  lastSprayInterrupt = currTime;
 }
