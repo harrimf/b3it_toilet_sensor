@@ -47,11 +47,11 @@ int stateEntered = millis();
 byte menuIndex = 0;
 bool menuLoading = false;
 
-char* const menuStrings[] PROGMEM {
-  (char*) "Number 1 delay",
-  (char*) "Number 2 delay",
-  (char*) "Manual delay",
-  (char*) "Back"
+String menuStrings[] {
+  "Number 1 delay",
+  "Number 2 delay",
+  "Manual delay",
+  "Back"
 };
 
 bool seatDistance() {
