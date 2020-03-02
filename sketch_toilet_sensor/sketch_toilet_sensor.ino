@@ -62,8 +62,10 @@ scheduledEvent eventArray[numEvents] = { // stores all scheduled events
   {2000, 0, []() {  // temperature sensor-related interval
     sensors.requestTemperatures(); // Send the command to get temperatures
     ambientTemperature = sensors.getTempCByIndex(0);
-    lcd.setCursor(0,0);
-    lcd.print(String(ambientTemperature) + " C"); // memory-heavy operation
+    if (currentState != STATE_OPERATOR_MENU){
+      lcd.setCursor(0,0);
+      lcd.print(String(ambientTemperature) + " C"); // memory-heavy operation
+    }
   }},
   {200, 0, []() {  // distance sensor-related interval
     digitalWrite(trigPin, HIGH);
@@ -140,7 +142,9 @@ void setup() {
   remainingSprays += EEPROM.read(0) << 8;
   remainingSprays += EEPROM.read(1);
 
-  displayRemainingSprays();
+  if (currentState != STATE_OPERATOR_MENU) {
+    displayRemainingSprays();
+  }
 
   attachInterrupt(digitalPinToInterrupt(2), sprayInterrupt, FALLING);
   attachInterrupt(digitalPinToInterrupt(3), menuInterrupt, FALLING);
@@ -201,6 +205,7 @@ void loop() {
 }
 
 void renderMenu() {
+  Serial.println("Rendering menu");
   byte dispOffset = 0;
   if (menuIndex == 3) {
     dispOffset = 1;
