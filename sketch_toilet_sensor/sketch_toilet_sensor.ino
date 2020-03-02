@@ -11,6 +11,7 @@ struct scheduledEvent {
   CallbackFunc func;
 };
 
+#define NUM_MENU_ITEMS 5
 #define numEvents 5
 #define trigPin 4
 #define echoPin 5
@@ -25,7 +26,6 @@ struct scheduledEvent {
 #define STATE_IN_USE_PEEING_SITTING 5
 #define STATE_IN_USE_CLEANING 6
 #define STATE_TRIGGERED 7
-#define STATE_TRIGGERED_DOUBLE 8
 #define STATE_OPERATOR_MENU 9
 #define STATE_OPERATOR_MENU_VAR 10
 
@@ -43,15 +43,42 @@ int lightLevel = 0;
 bool seatUp = false;
 int remainingSprays = 0;
 byte currentState = STATE_NOT_IN_USE;
-int stateEntered = millis();
+long stateEntered = millis();
 byte menuIndex = 0;
 bool menuLoading = false;
+bool dispLoading = true;
+byte ledOn = 1;
+bool lastLeftState = false;
+long leftLastChanged = millis();
+bool lastMiddleState = false;
+long middleLastChanged = millis();
+bool lastRightState = false;
+long rightLastChanged = millis();
+long currTime = millis();
+byte sprayMode = 0; // 0 = pee, 1 = poo, 2 = manual
 
-String menuStrings[] {
-  "Number 1 delay",
-  "Number 2 delay",
-  "Manual delay",
-  "Back"
+const String menuStrings[] {
+  "Number 1 delay  ",
+  "Number 2 delay  ",
+  "Manual delay    ",
+  "Reset shots     ",
+  "Back            "
+};
+
+
+int readEEPROMInt(byte addr) {
+  return (EEPROM.read(addr) << 8) + EEPROM.read(addr + 1);
+}
+
+void updateEEPROMInt(byte addr, int val){
+  EEPROM.update(addr, val >> 8);
+  EEPROM.update(addr + 1, val);
+}
+
+int configValues[] {
+  readEEPROMInt(2), // number 1 delay
+  readEEPROMInt(4), // number 2 delay
+  readEEPROMInt(6)  // manual override delay
 };
 
 bool seatDistance() {
@@ -62,7 +89,7 @@ scheduledEvent eventArray[numEvents] = { // stores all scheduled events
   {2000, 0, []() {  // temperature sensor-related interval
     sensors.requestTemperatures(); // Send the command to get temperatures
     ambientTemperature = sensors.getTempCByIndex(0);
-    if (currentState != STATE_OPERATOR_MENU){
+    if (currentState != STATE_OPERATOR_MENU && currentState != STATE_OPERATOR_MENU_VAR){
       lcd.setCursor(0,0);
       lcd.print(String(ambientTemperature) + " C"); // memory-heavy operation
     }
@@ -99,10 +126,12 @@ scheduledEvent eventArray[numEvents] = { // stores all scheduled events
       }
     } else if (lightLevel - newLightLevel > 150) {
       if (currentState == STATE_IN_USE_POOPING) {
-        currentState = STATE_TRIGGERED_DOUBLE; // user is done pooping
+        sprayMode = 1;
+        currentState = STATE_TRIGGERED; // user is done pooping
       } else if (currentState == STATE_IN_USE_CLEANING) {
         currentState = STATE_NOT_IN_USE; // user is done cleaning
       } else if (currentState == STATE_IN_USE_PEEING_SITTING) {
+        sprayMode = 0;
         currentState = STATE_TRIGGERED; // user is done peeing sitting
       }
 
@@ -131,6 +160,23 @@ unsigned long currentMillis = 0;
 byte ledState = 0;
 
 void setup() {
+  // default EEPROM values
+  if (readEEPROMInt(0) < 0) {
+    updateEEPROMInt(0, 2400);
+  }
+  if (readEEPROMInt(2) < 0) {
+    configValues[0] = 0;
+    updateEEPROMInt(2, 0);
+  }
+  if (readEEPROMInt(4) < 0) {
+    configValues[1] = 0;
+    updateEEPROMInt(2, 0);
+  }
+  if (readEEPROMInt(6) < 0) {
+    configValues[2] = 0;
+    updateEEPROMInt(2, 0);
+  }
+  pinMode(13, OUTPUT);
   pinMode(12, OUTPUT);
   pinMode(trigPin, OUTPUT);
   pinMode(echoPin, INPUT);
@@ -139,22 +185,19 @@ void setup() {
   lcd.begin(16, 2);
   sensors.begin();
   Serial.begin(9600);
-  remainingSprays += EEPROM.read(0) << 8;
-  remainingSprays += EEPROM.read(1);
-
-  if (currentState != STATE_OPERATOR_MENU) {
-    displayRemainingSprays();
-  }
+  remainingSprays = readEEPROMInt(0);
 
   attachInterrupt(digitalPinToInterrupt(2), sprayInterrupt, FALLING);
   attachInterrupt(digitalPinToInterrupt(3), menuInterrupt, FALLING);
 }
 
 void displayRemainingSprays() {
-  lcd.setCursor(0, 1);
-  lcd.print(F("Remaining:"));
-  lcd.setCursor(10, 1);
-  lcd.print(remainingSprays);
+  if (currentState != STATE_OPERATOR_MENU && currentState != STATE_OPERATOR_MENU_VAR) {
+    lcd.setCursor(0, 1);
+    lcd.print(F("Remaining:"));
+    lcd.setCursor(10, 1);
+    lcd.print(remainingSprays);
+  }
 }
 
 void loop() {
@@ -164,6 +207,13 @@ void loop() {
   buttonsState += 1 - digitalRead(2);
     
   eventLoop();
+
+  if (dispLoading) {
+    displayRemainingSprays();
+    dispLoading = false;
+  }
+
+  digitalWrite(13, (ledOn = 1 - ledOn));
 
   switch (currentState) {
     case STATE_IN_USE_SEAT_UP:
@@ -177,10 +227,7 @@ void loop() {
       }
       break;
     case STATE_IN_USE_PEEING_STANDING:
-      currentState = STATE_TRIGGERED;
-      break;
-    case STATE_TRIGGERED_DOUBLE:
-      spray();
+      sprayMode = 0;
       currentState = STATE_TRIGGERED;
       break;
     case STATE_TRIGGERED:
@@ -192,13 +239,98 @@ void loop() {
         renderMenu();
         menuLoading = false;
       }
-      if (digitalRead(A4)) {
-        menuIndex--;
-        menuLoading = true;
-      } else if (digitalRead(2)) {
-        menuIndex++;
-        menuLoading = true;
+      currTime = millis();
+      if (currTime - leftLastChanged > 100) { // otherwise not interested in this value
+        bool leftState = !digitalRead(A4); // is left button pressed?
+        if (leftState != lastLeftState) { // state changed
+          leftLastChanged = currTime;
+          if (leftState) { // state is pressed (so the button just got pressed)
+            menuIndex = max(0, menuIndex - 1);
+            menuLoading = true;
+          }
+        }
+        lastLeftState = leftState;
       }
+      if (currTime - middleLastChanged > 100) { // otherwise not interested in this value
+        bool middleState = !digitalRead(3); // is middle button pressed?
+        if (middleState != lastMiddleState) { // state changed
+          middleLastChanged = currTime;
+          if (middleState) { // state is pressed (so the button just got pressed)
+            currentState = STATE_OPERATOR_MENU_VAR;
+            menuLoading = true;
+          }
+        }
+        lastMiddleState = middleState;
+      }
+      if (currTime - rightLastChanged > 100) { // otherwise not interested in this value
+        bool rightState = !digitalRead(2); // is right button pressed?
+        if (rightState != lastRightState) { // state changed
+          rightLastChanged = currTime;
+          if (rightState) { // state is pressed (so the button just got pressed)
+            menuIndex = min(NUM_MENU_ITEMS - 1, menuIndex + 1);
+            menuLoading = true;
+          }
+        }
+        lastRightState = rightState;
+      }
+      break;
+    case STATE_OPERATOR_MENU_VAR:
+      if (menuIndex == NUM_MENU_ITEMS - 2) { // reset sprays button
+        remainingSprays = 2400;
+        updateEEPROMInt(0, remainingSprays);
+        menuIndex = NUM_MENU_ITEMS - 1; // exit from menu
+      }
+      if (menuIndex == NUM_MENU_ITEMS - 1) { // back button
+        lcd.clear(); // clear so the display doesn't retain junk on the screen
+        dispLoading = true; // loading flag so the remaining shots get rendered again
+        menuLoading = true;
+        currentState = STATE_NOT_IN_USE; // exit out of menu
+        Serial.println("Exiting menu...");
+        attachInterrupt(digitalPinToInterrupt(2), sprayInterrupt, FALLING); // enable interrupts again
+        attachInterrupt(digitalPinToInterrupt(3), menuInterrupt, FALLING);
+        break;
+      }
+      if (menuLoading) {
+        renderVarMenu();
+        menuLoading = false;
+      }
+      currTime = millis();
+      if (currTime - leftLastChanged > 100) { // otherwise not interested in this value
+        bool leftState = !digitalRead(A4); // is left button pressed?
+        if (leftState != lastLeftState) { // state changed
+          leftLastChanged = currTime;
+          if (leftState) { // state is pressed (so the button just got pressed)
+            configValues[menuIndex] -= 100;
+            menuLoading = true;
+          }
+        }
+        lastLeftState = leftState;
+      }
+      if (currTime - middleLastChanged > 100) { // otherwise not interested in this value
+        bool middleState = !digitalRead(3); // is middle button pressed?
+        if (middleState != lastMiddleState) { // state changed
+          middleLastChanged = currTime;
+          if (middleState) { // state is pressed (so the button just got pressed)
+            lcd.clear();
+            updateEEPROMInt((menuIndex + 1) * 2, configValues[menuIndex]);
+            currentState = STATE_OPERATOR_MENU;
+            menuLoading = true;
+          }
+        }
+        lastMiddleState = middleState;
+      }
+      if (currTime - rightLastChanged > 100) { // otherwise not interested in this value
+        bool rightState = !digitalRead(2); // is right button pressed?
+        if (rightState != lastRightState) { // state changed
+          rightLastChanged = currTime;
+          if (rightState) { // state is pressed (so the button just got pressed)
+            configValues[menuIndex] += 100;
+            menuLoading = true;
+          }
+        }
+        lastRightState = rightState;
+      }
+      break;
     default:
       break;
   }
@@ -207,7 +339,7 @@ void loop() {
 void renderMenu() {
   Serial.println("Rendering menu");
   byte dispOffset = 0;
-  if (menuIndex == 3) {
+  if (menuIndex == NUM_MENU_ITEMS - 1) {
     dispOffset = 1;
   }
   lcd.setCursor(0, dispOffset);
@@ -218,6 +350,14 @@ void renderMenu() {
   lcd.print(menuStrings[menuIndex - dispOffset]);
   lcd.setCursor(1, 1);
   lcd.print(menuStrings[menuIndex + 1 - dispOffset]);
+}
+
+void renderVarMenu() {
+  lcd.clear();
+  lcd.setCursor(1, 0);
+  lcd.print(configValues[menuIndex]);
+  lcd.setCursor(0, 1);
+  lcd.print(F(" <     OK     > "));
 }
 
 void eventLoop() { // handles running of all scheduled events
@@ -231,37 +371,47 @@ void eventLoop() { // handles running of all scheduled events
 }
 
 void spray() {
+  Serial.print("Spraying, mode = ");
+  Serial.println(sprayMode);
   detachInterrupt(digitalPinToInterrupt(2)); // detach the interrupts. We can't disable them fully because we use delays, which are dependent upon interrupts
   detachInterrupt(digitalPinToInterrupt(3));
+  delay(configValues[sprayMode]);
   digitalWrite(12, HIGH);
   delay(700);
   digitalWrite(12, LOW);
-  attachInterrupt(digitalPinToInterrupt(2), sprayInterrupt, FALLING); // dangerous section that can break the motor is over
-  attachInterrupt(digitalPinToInterrupt(3), menuInterrupt, FALLING);
   remainingSprays--;
-  EEPROM.update(0, remainingSprays >> 8);
-  EEPROM.update(1, remainingSprays);
+  if (sprayMode == 1) { // poop, so double spray
+    delay(2000); // make sure the motor gets time to reset
+    digitalWrite(12, HIGH);
+    delay(700);
+    digitalWrite(12, LOW);
+    remainingSprays--;
+  }
+  attachInterrupt(digitalPinToInterrupt(2), sprayInterrupt, FALLING); // dangerous section - that can break the motor - is over
+  attachInterrupt(digitalPinToInterrupt(3), menuInterrupt, FALLING);
+  updateEEPROMInt(0, remainingSprays);
+  displayRemainingSprays();
 }
 
-int lastSprayInterrupt = 0;
+
 
 void sprayInterrupt() {
-  int currTime = millis();
-  if (currTime - lastSprayInterrupt > 100) { // debounce
-      currentState = STATE_TRIGGERED;
+  long currTime = millis();
+  if (currTime - rightLastChanged > 100) { // debounce
+    sprayMode = 2; // manual mode
+    currentState = STATE_TRIGGERED;
   }
-  lastSprayInterrupt = currTime;
+  rightLastChanged = currTime;
 }
 
-int lastMenuInterrupt = 0;
-
 void menuInterrupt() {
-  int currTime = millis();
-  detachInterrupt(digitalPinToInterrupt(2));
-  detachInterrupt(digitalPinToInterrupt(3));
-  if (currTime - lastMenuInterrupt > 100) { // debounce
+  long myCurrTime = millis();
+  if (myCurrTime - middleLastChanged > 100) { // debounce
+    detachInterrupt(digitalPinToInterrupt(2));
+    detachInterrupt(digitalPinToInterrupt(3));
     menuLoading = true;
+    lastMiddleState = true;
     currentState = STATE_OPERATOR_MENU;
   }
-  lastMenuInterrupt = currTime;
+  middleLastChanged = myCurrTime;
 }
