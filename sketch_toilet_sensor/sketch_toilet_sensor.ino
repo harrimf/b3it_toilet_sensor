@@ -27,6 +27,7 @@ struct scheduledEvent {
 #define STATE_TRIGGERED 7
 #define STATE_TRIGGERED_DOUBLE 8
 #define STATE_OPERATOR_MENU 9
+#define STATE_OPERATOR_MENU_VAR 10
 
 OneWire oneWire(ONE_WIRE_BUS);
 DallasTemperature sensors(&oneWire);
@@ -43,7 +44,15 @@ bool seatUp = false;
 int remainingSprays = 0;
 byte currentState = STATE_NOT_IN_USE;
 int stateEntered = millis();
+byte menuIndex = 0;
+bool menuLoading = false;
 
+char* const menuStrings[] PROGMEM {
+  (char*) "Number 1 delay",
+  (char*) "Number 2 delay",
+  (char*) "Manual delay",
+  (char*) "Back"
+};
 
 bool seatDistance() {
   return (((seatDists & 1) + ((seatDists & B10) >> 1) + ((seatDists & B100) >> 2) + ((seatDists & B1000) >> 3) + ((seatDists & B10000) >> 4)) > 3);// if at least 3 of last 5 satisfy the seat distance constraint, return true
@@ -123,10 +132,6 @@ void setup() {
   pinMode(12, OUTPUT);
   pinMode(trigPin, OUTPUT);
   pinMode(echoPin, INPUT);
-  
-//  int numSprays = 2385;
-//  EEPROM.update(0, numSprays >> 8);
-//  EEPROM.update(1, numSprays);
 
   // put your setup code here, to run once:
   lcd.begin(16, 2);
@@ -135,12 +140,17 @@ void setup() {
   remainingSprays += EEPROM.read(0) << 8;
   remainingSprays += EEPROM.read(1);
 
+  displayRemainingSprays();
+
+  attachInterrupt(digitalPinToInterrupt(2), sprayInterrupt, FALLING);
+  attachInterrupt(digitalPinToInterrupt(3), menuInterrupt, FALLING);
+}
+
+void displayRemainingSprays() {
   lcd.setCursor(0, 1);
   lcd.print(F("Remaining:"));
   lcd.setCursor(10, 1);
   lcd.print(remainingSprays);
-
-  attachInterrupt(digitalPinToInterrupt(2), sprayInterrupt, FALLING);
 }
 
 void loop() {
@@ -173,9 +183,36 @@ void loop() {
       spray();
       currentState = STATE_NOT_IN_USE;
       break;
+    case STATE_OPERATOR_MENU:
+      if (menuLoading) {
+        renderMenu();
+        menuLoading = false;
+      }
+      if (digitalRead(A4)) {
+        menuIndex--;
+        menuLoading = true;
+      } else if (digitalRead(2)) {
+        menuIndex++;
+        menuLoading = true;
+      }
     default:
       break;
   }
+}
+
+void renderMenu() {
+  byte dispOffset = 0;
+  if (menuIndex == 3) {
+    dispOffset = 1;
+  }
+  lcd.setCursor(0, dispOffset);
+  lcd.print('>');
+  lcd.setCursor(0, 1-dispOffset);
+  lcd.print(' ');
+  lcd.setCursor(1, 0);
+  lcd.print(menuStrings[menuIndex - dispOffset]);
+  lcd.setCursor(1, 1);
+  lcd.print(menuStrings[menuIndex + 1 - dispOffset]);
 }
 
 void eventLoop() { // handles running of all scheduled events
@@ -189,19 +226,37 @@ void eventLoop() { // handles running of all scheduled events
 }
 
 void spray() {
-  Serial.println("Spraying"); // might want to disable operator menu while pin 12 is HIGH
+  detachInterrupt(digitalPinToInterrupt(2)); // detach the interrupts. We can't disable them fully because we use delays, which are dependent upon interrupts
+  detachInterrupt(digitalPinToInterrupt(3));
   digitalWrite(12, HIGH);
   delay(700);
   digitalWrite(12, LOW);
-  Serial.println("Done spraying");
+  attachInterrupt(digitalPinToInterrupt(2), sprayInterrupt, FALLING); // dangerous section that can break the motor is over
+  attachInterrupt(digitalPinToInterrupt(3), menuInterrupt, FALLING);
+  remainingSprays--;
+  EEPROM.update(0, remainingSprays >> 8);
+  EEPROM.update(1, remainingSprays);
 }
 
 int lastSprayInterrupt = 0;
 
 void sprayInterrupt() {
   int currTime = millis();
-  if (currTime - lastSprayInterrupt > 100) {
+  if (currTime - lastSprayInterrupt > 100) { // debounce
       currentState = STATE_TRIGGERED;
   }
   lastSprayInterrupt = currTime;
+}
+
+int lastMenuInterrupt = 0;
+
+void menuInterrupt() {
+  int currTime = millis();
+  detachInterrupt(digitalPinToInterrupt(2));
+  detachInterrupt(digitalPinToInterrupt(3));
+  if (currTime - lastMenuInterrupt > 100) { // debounce
+    menuLoading = true;
+    currentState = STATE_OPERATOR_MENU;
+  }
+  lastMenuInterrupt = currTime;
 }
